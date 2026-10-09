@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+config.json
+qr.png
+inbox.jsonl
+state.json
+status.json
+bridge.pid
+bridge.log
+onboard.log
+pending.md
+media/
+dist/
+tests/.tmp/
+egress.env
+handled.json
+approvals.json

@@ -1,0 +1,3 @@
+# lark-oapi 的 register_app 与 WebSocket 代理兼容补丁依赖 1.x 内部实现。
+lark-oapi>=1.6.8,<2
+qrcode[pil]

@@ -1,0 +1,24 @@
+# ⚠️ 警告：这是模板文件，绝对不能直接复制到 /etc/systemd/system/ 下使用！
+# 里面双下划线包裹的 INSTALL_DIR / VENV_PYTHON 是待渲染占位符，直接 cp 过去
+# 会让 systemd 报 "Unit configuration has fatal error"、桥根本起不来，而且
+# 覆盖当时不杀已运行进程，要等下次重启才爆雷，极易漏检（0.3.7 之前两天
+# 内在用户机器上反复发生 6 次）。正确做法只有一个：在项目根目录运行
+# ./install.sh，由它渲染、校验后安装。手动 cp 本文件 = 埋雷。
+[Unit]
+Description=Feishu/Lark inbox bridge for Muse - WS long connection, no echo
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__INSTALL_DIR__
+ExecStart=__VENV_PYTHON__ __INSTALL_DIR__/bridge.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+KillMode=control-group
+StandardOutput=append:__INSTALL_DIR__/bridge.log
+StandardError=append:__INSTALL_DIR__/bridge.log
+
+[Install]
+WantedBy=default.target

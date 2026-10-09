@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# Feishu inbox watcher: wakes the agent when the user sends a new DM to
+# the Feishu bot (bridge appends accepted messages to inbox.jsonl).
+# Detection + claim state live in the project's inbox_hook.py.
+# ⚠️ 本文件是模板：必须由 install.sh 渲染（替换安装目录占位符）后放到
+# ~/hooks/scripts/，直接 cp 模板当脚本用会让自愈逻辑失效甚至覆写坏
+# systemd unit——0.3.7 起脚本会先自检 BRIDGE_DIR，未渲染直接拒绝自愈。
+set -euo pipefail
+source "$HATCH_HOOK_RUNTIME"
+
+BRIDGE_DIR="__INSTALL_DIR__"
+UNIT_FILE="/etc/systemd/system/feishu-bridge.service"
+
+# Placeholder tokens, assembled at runtime ON PURPOSE. install.sh renders
+# this script by plain string replacement of the literal tokens, so any
+# literal occurrence in the code below (sed search patterns, grep
+# patterns) would itself be replaced at install time — turning the
+# self-heal sed into a no-op identity substitution and the placeholder
+# greps into searches for the install path. That is exactly how the
+# pre-0.3.7 self-heal silently corrupted units on machines where the
+# script had been rendered by install.sh. The ONLY literal token in
+# this file is the BRIDGE_DIR assignment above.
+PH_DIR="__INSTALL"
+PH_DIR="${PH_DIR}_DIR__"
+PH_PY="__VENV"
+PH_PY="${PH_PY}_PYTHON__"
+
+# Self-heal (hardened in 0.3.7): in sandboxes with an ephemeral rootfs the
+# bridge's systemd unit can vanish on VM replacement. The pre-0.3.7 logic
+# rewrote the unit on EVERY poll whenever the service was inactive, with
+# an unvalidated `sed > /etc/...` that truncated/corrupted a good unit
+# whenever rendering went wrong (e.g. this script itself installed
+# unrendered) — and systemd then refused to start the bridge at all.
+# Rules now:
+#   * re-render ONLY when the unit is missing or still contains
+#     placeholders; a correctly rendered unit is never overwritten;
+#   * render to a temp file and validate it (non-empty, no leftover
+#     placeholders, WorkingDirectory matches) before installing it
+#     atomically; on any failure the existing unit stays untouched;
+#   * if this script itself is unrendered (BRIDGE_DIR still contains a
+#     placeholder), refuse to touch /etc at all and log FAILED;
+#   * after a start attempt, verify is-active and log restored vs FAILED.
+if [ "${HATCH_HOOK_DRY_RUN:-0}" != "1" ] && command -v systemctl >/dev/null 2>&1; then
+  case "$BRIDGE_DIR" in
+    *__*)
+      log "feishu-bridge self-heal FAILED: hook script is an unrendered template (BRIDGE_DIR contains a placeholder); run install.sh in the project dir to render it; systemd unit left untouched" '{}'
+      ;;
+    *)
+      if [ -f "$BRIDGE_DIR/config.json" ]; then
+        NEED_RENDER=0
+        if [ ! -f "$UNIT_FILE" ] || grep -q "${PH_DIR}\|${PH_PY}" "$UNIT_FILE" 2>/dev/null; then
+          NEED_RENDER=1
+        fi
+        RENDER_FAILED=0
+        if [ "$NEED_RENDER" = "1" ]; then
+          TMP_UNIT="$(mktemp 2>/dev/null || echo "")"
+          RENDER_OK=0
+          if [ -n "$TMP_UNIT" ]; then
+            if sed -e "s|${PH_DIR}|$BRIDGE_DIR|g" \
+                   -e "s|${PH_PY}|$BRIDGE_DIR/.venv/bin/python|g" \
+                   "$BRIDGE_DIR/systemd/feishu-bridge.service.template" \
+                   > "$TMP_UNIT" 2>/dev/null \
+               && [ -s "$TMP_UNIT" ] \
+               && ! grep -q "${PH_DIR}\|${PH_PY}" "$TMP_UNIT" \
+               && grep -q "WorkingDirectory=$BRIDGE_DIR" "$TMP_UNIT"; then
+              if install -m 644 "$TMP_UNIT" "$UNIT_FILE" 2>/dev/null || cp "$TMP_UNIT" "$UNIT_FILE" 2>/dev/null; then
+                RENDER_OK=1
+              fi
+            fi
+            rm -f "$TMP_UNIT" 2>/dev/null || true
+          fi
+          if [ "$RENDER_OK" = "1" ]; then
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            systemctl enable feishu-bridge >/dev/null 2>&1 || true
+          else
+            RENDER_FAILED=1
+            log "feishu-bridge self-heal FAILED: unit render/validation failed; existing unit left untouched" '{}'
+          fi
+        fi
+        if [ "$RENDER_FAILED" = "0" ] && ! systemctl is-active --quiet feishu-bridge 2>/dev/null; then
+          systemctl start feishu-bridge >/dev/null 2>&1 || true
+          if systemctl is-active --quiet feishu-bridge 2>/dev/null; then
+            log "feishu-bridge self-heal restored: service is active again" '{}'
+          else
+            log "feishu-bridge self-heal FAILED: service still not active after start attempt; check systemctl status feishu-bridge" '{}'
+          fi
+        fi
+      fi
+      ;;
+  esac
+fi
+
+OUT="$("$BRIDGE_DIR/.venv/bin/python" "$BRIDGE_DIR/inbox_hook.py" check 2>/dev/null || true)"
+if [ -z "$OUT" ]; then
+  log "inbox check failed or empty output" '{}'
+  silent "inbox check inconclusive" '{}'
+fi
+
+COUNT="$(printf '%s' "$OUT" | jq -r '.new | length' 2>/dev/null || echo 0)"
+if [ "$COUNT" = "0" ]; then
+  silent "no new feishu messages" "$OUT"
+fi
+
+log "new feishu message(s) detected" "$OUT"
+wake "用户在飞书发来新消息" "$OUT"
